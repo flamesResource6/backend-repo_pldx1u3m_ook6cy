@@ -1,6 +1,9 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, HttpUrl
+from typing import List, Optional
+from bson import ObjectId
 
 app = FastAPI()
 
@@ -12,13 +15,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 def read_root():
     return {"message": "Hello from FastAPI Backend!"}
 
+
 @app.get("/api/hello")
 def hello():
     return {"message": "Hello from the backend API!"}
+
 
 @app.get("/test")
 def test_database():
@@ -63,6 +69,83 @@ def test_database():
     response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
     
     return response
+
+
+# -------------------- Products API --------------------
+class ProductIn(BaseModel):
+    title: str = Field(..., description="Product title")
+    description: Optional[str] = Field(None, description="Product description")
+    price: float = Field(..., ge=0, description="Price in EUR")
+    category: Optional[str] = Field(None, description="Product category")
+    in_stock: bool = Field(True, description="In stock")
+    image_urls: List[HttpUrl] = Field(default_factory=list)
+    video_url: Optional[HttpUrl] = None
+
+class ProductOut(ProductIn):
+    id: str
+
+
+@app.get("/api/products", response_model=List[ProductOut])
+def list_products():
+    from database import get_documents
+    docs = get_documents("product", {}, limit=100)
+    out: List[ProductOut] = []
+    for d in docs:
+        # Convert ObjectId to string if present
+        _id = str(d.get("_id")) if d.get("_id") else ""
+        # Remove Mongo internal fields
+        d.pop("_id", None)
+        d.pop("created_at", None)
+        d.pop("updated_at", None)
+        out.append(ProductOut(id=_id, **d))
+    return out
+
+
+@app.post("/api/products", response_model=dict)
+def create_product(payload: ProductIn):
+    from database import create_document
+    product_id = create_document("product", payload)
+    return {"id": product_id}
+
+
+class CheckoutIn(BaseModel):
+    product_id: str
+    quantity: int = Field(1, ge=1, le=10)
+
+class CheckoutOut(BaseModel):
+    status: str
+    message: str
+    order_id: str
+
+
+@app.post("/api/checkout", response_model=CheckoutOut)
+def checkout(payload: CheckoutIn):
+    # This is a mock checkout implementation for demo purposes.
+    # In production, integrate with Stripe/PayPal and verify payment.
+    try:
+        # Basic validation that product exists
+        from database import db
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database not available")
+        try:
+            oid = ObjectId(payload.product_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid product_id")
+        product = db["product"].find_one({"_id": oid})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        # Create a simple order record
+        order = {
+            "product_id": payload.product_id,
+            "quantity": payload.quantity,
+            "status": "paid",  # mock status
+        }
+        res = db["order"].insert_one(order)
+        return CheckoutOut(status="success", message="Payment processed (demo)", order_id=str(res.inserted_id))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
